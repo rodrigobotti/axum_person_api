@@ -1,0 +1,19 @@
+version: '3'
+
+services:
+  # TODO: application replicas + nginx
+
+  database:
+    image: postgres:14.6-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: person
+      POSTGRES_PASSWORD: person
+      POSTGRES_DB: person
+      TZ: GMT
+      PGTZ: GMT
+    ports:
+      - 5432:5432
+    volumes:
+      - ./create-database.sql:/docker-entrypoint-initdb.d/init.sql
+    
