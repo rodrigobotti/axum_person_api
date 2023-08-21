@@ -38,7 +38,8 @@ struct CreatePersonPayload {
 
 #[derive(Debug, Default, Deserialize)]
 struct SearchPersonQuery {
-    t: String,
+    #[serde(rename(deserialize = "t"))]
+    search_term: String,
 }
 
 // TODO: serialize json parse errors as ErrorResponse
@@ -58,49 +59,49 @@ enum RepositoryError {
 
 impl IntoResponse for RepositoryError {
     fn into_response(self) -> Response {
-        let status = match self {
-            RepositoryError::NotFound { .. } => StatusCode::NOT_FOUND,
-            RepositoryError::Conflict { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            RepositoryError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, response) = match self {
+            RepositoryError::NotFound {
+                resoure_name,
+                resource_id,
+            } => (
+                StatusCode::NOT_FOUND,
+                ErrorResponse {
+                    detail: format!(
+                        "Resource '{}' with id {} not found",
+                        resoure_name, resource_id
+                    ),
+                    o_type: "NotFound",
+                    title: "Resource not found",
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                },
+            ),
+            RepositoryError::Conflict { reason } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorResponse {
+                    status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                    o_type: "Conflict",
+                    title: "Unprocessable entity",
+                    detail: format!("Conflict due to {}", reason),
+                },
+            ),
+            RepositoryError::Unexpected => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorResponse {
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    o_type: "Unexpected",
+                    title: "Internal Server Error",
+                    detail: "Unexpected error".to_owned(),
+                },
+            ),
         };
-        (status, Json(ErrorResponse::from(self))).into_response()
+
+        (status, Json(response)).into_response()
     }
 }
 
 impl From<RepositoryError> for AppError {
     fn from(value: RepositoryError) -> Self {
         AppError::Repo(value)
-    }
-}
-
-impl From<RepositoryError> for ErrorResponse {
-    fn from(value: RepositoryError) -> Self {
-        match value {
-            RepositoryError::NotFound {
-                resoure_name,
-                resource_id,
-            } => ErrorResponse {
-                detail: format!(
-                    "Resource {} with id {} not found",
-                    resoure_name, resource_id
-                ),
-                o_type: "NotFound",
-                title: "Resource not found",
-                status: StatusCode::NOT_FOUND.as_u16(),
-            },
-            RepositoryError::Conflict { reason } => ErrorResponse {
-                status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-                o_type: "Conflict",
-                title: "Unprocessable entity",
-                detail: format!("Conflict due to {}", reason),
-            },
-            RepositoryError::Unexpected => ErrorResponse {
-                status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                o_type: "Unexpected",
-                title: "Internal Server Error",
-                detail: "Unexpected error".to_owned(),
-            },
-        }
     }
 }
 
@@ -147,7 +148,7 @@ impl PostgresPersonRepository {
     fn handle_create_error(err: sqlx::Error) -> AppError {
         if let Some(pg_error) = err
             .as_database_error()
-            .map(|e| e.downcast_ref::<PgDatabaseError>())
+            .and_then(|e| e.try_downcast_ref::<PgDatabaseError>())
         {
             if pg_error.code() == "23505" {
                 return RepositoryError::Conflict {
@@ -159,13 +160,18 @@ impl PostgresPersonRepository {
         // TODO: log error
         RepositoryError::Unexpected.into()
     }
+
+    fn handle_unexpected_error(_err: sqlx::Error) -> AppError {
+        // TODO: log error
+        RepositoryError::Unexpected.into()
+    }
 }
 
 #[async_trait]
 impl PersonRepository for PostgresPersonRepository {
     async fn create_person(&self, person: CreatePersonPayload) -> Result<Person, AppError> {
         sqlx::query_as(
-            "INSERT INTO person (nickname, name, dob, stacks) 
+            "INSERT INTO person (nickname, name, dob, stacks)
             VALUES ($1, $2, $3, $4)
             RETURNING *",
         )
@@ -191,10 +197,7 @@ impl PersonRepository for PostgresPersonRepository {
                 resource_id: id,
             }
             .into()),
-            Err(_err) => {
-                // TODO: log error
-                Err(RepositoryError::Unexpected.into())
-            }
+            Err(err) => Err(Self::handle_unexpected_error(err)),
         }
     }
     // TODO: performance
@@ -215,20 +218,14 @@ impl PersonRepository for PostgresPersonRepository {
         .bind(search_term)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_err| {
-            // TODO: log error
-            RepositoryError::Unexpected.into()
-        })
+        .map_err(Self::handle_unexpected_error)
     }
 
     async fn count(&self) -> Result<i64, AppError> {
         sqlx::query_scalar("SELECT COUNT(*) FROM person")
             .fetch_one(&self.pool)
             .await
-            .map_err(|_err| {
-                // TODO: log error
-                RepositoryError::Unexpected.into()
-            })
+            .map_err(Self::handle_unexpected_error)
     }
 }
 
@@ -254,7 +251,7 @@ async fn search_person(
     Query(query): Query<SearchPersonQuery>,
     State(repo): State<DynPersonRepo>,
 ) -> Result<Json<Vec<Person>>, AppError> {
-    let ps = repo.search_person(query.t).await?;
+    let ps = repo.search_person(query.search_term).await?;
     Ok(ps.into())
 }
 
