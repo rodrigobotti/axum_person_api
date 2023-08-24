@@ -5,7 +5,7 @@ REST API inspired by the [rinha de backend 2023](https://github.com/Tagliatti/ri
 PS: That's why the endpoints and json fields are in PT-BR.
 
 ## In progress
-- [ ] serialize json extractor errors as json rather than plain text
+- [x] serialize json extractor errors as json rather than plain text
 - [ ] search query optimization
 - [ ] logs using `tracing`
 - [ ] Dockerfile

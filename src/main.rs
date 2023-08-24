@@ -1,10 +1,12 @@
 use std::error::Error;
 use std::sync::Arc;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{async_trait, Json, Router};
+use axum_extra::extract::WithRejection;
 use chrono::NaiveDate;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -41,8 +43,6 @@ struct SearchPersonQuery {
     #[serde(rename(deserialize = "t"))]
     search_term: String,
 }
-
-// TODO: serialize json parse errors as ErrorResponse
 
 #[derive(Debug)]
 enum RepositoryError {
@@ -105,8 +105,15 @@ impl From<RepositoryError> for AppError {
     }
 }
 
+impl From<JsonRejection> for AppError {
+    fn from(value: JsonRejection) -> Self {
+        AppError::InvalidJsonRequest(value)
+    }
+}
+
 enum AppError {
     Repo(RepositoryError),
+    InvalidJsonRequest(JsonRejection),
 }
 
 #[derive(Serialize)]
@@ -122,6 +129,15 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::Repo(inner) => inner.into_response(),
+            AppError::InvalidJsonRequest(inner) => {
+                let res = ErrorResponse {
+                    status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                    o_type: "UnprocessableEntity",
+                    title: "Invalid request payload",
+                    detail: inner.body_text(),
+                };
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(res)).into_response()
+            }
         }
     }
 }
@@ -231,6 +247,8 @@ impl PersonRepository for PostgresPersonRepository {
 
 type DynPersonRepo = Arc<dyn PersonRepository + Send + Sync>;
 
+type JsonBody<T> = WithRejection<Json<T>, AppError>;
+
 async fn get_person(
     Path(id): Path<i64>,
     State(repo): State<DynPersonRepo>,
@@ -241,10 +259,10 @@ async fn get_person(
 
 async fn create_person(
     State(repo): State<DynPersonRepo>,
-    Json(payload): Json<CreatePersonPayload>,
-) -> Result<Json<Person>, AppError> {
+    WithRejection(Json(payload), _): JsonBody<CreatePersonPayload>,
+) -> Result<(StatusCode, Json<Person>), AppError> {
     let person = repo.create_person(payload).await?;
-    Ok(person.into())
+    Ok((StatusCode::CREATED, person.into()))
 }
 
 async fn search_person(
@@ -276,10 +294,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/pessoas", post(create_person))
         .route("/pessoas", get(search_person))
         .route("/contagem-pessoas", get(count_person))
-        .with_state(repo);
+        .with_state(repo)
+        .into_make_service();
 
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(app.into_make_service())
+        .serve(app)
         .await
         .expect("Failed to start service");
 
